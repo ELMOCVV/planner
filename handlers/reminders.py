@@ -18,6 +18,7 @@ from db.repo import (
     session_scope,
 )
 from handlers.states import ReminderFlow
+from handlers.ui import CLOSE_BUTTON, EMPTY_KB
 from services import conversation, llm_parser, scheduler
 
 logger = logging.getLogger(__name__)
@@ -157,9 +158,10 @@ async def handle_reschedule(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     if choice == "no":
         await state.clear()
-        await callback.message.edit_text("Хорошо, отменил.")
+        await callback.message.edit_text("Хорошо, отменил.", reply_markup=EMPTY_KB)
         await callback.answer()
         return
+    await callback.message.edit_reply_markup(reply_markup=EMPTY_KB)
     event_time = dt.datetime.fromisoformat(data["draft_time"]) + dt.timedelta(days=1)
     await _show_offsets(
         callback.message, state, data.get("draft_text", ""), event_time, data.get("recurrence_rule")
@@ -186,13 +188,14 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
 
     if action == "cancel":
         await state.clear()
-        await callback.message.edit_text("❌ Отменено.")
+        await callback.message.edit_text("❌ Отменено.", reply_markup=EMPTY_KB)
         await callback.answer()
         return
 
     if action == "custom":
         await state.set_state(ReminderFlow.waiting_custom_offset)
         await callback.answer()
+        await callback.message.edit_reply_markup(reply_markup=EMPTY_KB)
         reply = "За сколько напомнить? Например «за 40 минут» или «за день»."
         conversation.record_bot(callback.from_user.id, reply)
         await callback.message.answer(reply)
@@ -219,7 +222,7 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
 
         await state.clear()
         await callback.message.edit_text(
-            f"✅ Напоминание создано: {text} — {_fmt_time(event_time)}"
+            f"✅ Напоминание создано: {text} — {_fmt_time(event_time)}", reply_markup=EMPTY_KB
         )
         await callback.answer()
 
@@ -270,6 +273,7 @@ async def show_reminders_list(message: Message) -> None:
         if r.recurrence_rule:
             label += " 🔁"
         rows.append([InlineKeyboardButton(text=f"🗑 {label}", callback_data=f"remdel:{r.id}")])
+    rows.append([CLOSE_BUTTON])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer("Твои напоминания:", reply_markup=kb)
 
@@ -288,7 +292,7 @@ async def handle_delete_reminder(callback: CallbackQuery) -> None:
         await delete_reminder(session, reminder_id)
         await session.commit()
     await callback.answer("Удалено")
-    await callback.message.edit_text("🗑 Напоминание удалено.")
+    await callback.message.edit_text("🗑 Напоминание удалено.", reply_markup=EMPTY_KB)
 
 
 @router.callback_query(F.data.startswith("rem_done:"))
@@ -303,7 +307,7 @@ async def handle_rem_done(callback: CallbackQuery) -> None:
             await delete_reminder(session, reminder_id)
             await session.commit()
     await callback.answer("Отлично!")
-    await callback.message.edit_text(f"✅ {callback.message.text}")
+    await callback.message.edit_text(f"✅ {callback.message.text}", reply_markup=EMPTY_KB)
 
 
 @router.callback_query(F.data.startswith("rem_snooze:"))
@@ -312,5 +316,5 @@ async def handle_rem_snooze(callback: CallbackQuery) -> None:
     fire_time = await scheduler.snooze_reminder(int(reminder_id_s), int(minutes_s))
     await callback.answer("Отложено")
     await callback.message.edit_text(
-        f"{callback.message.text}\n\n⏰ Отложено до {fire_time.strftime('%H:%M')}"
+        f"{callback.message.text}\n\n⏰ Отложено до {fire_time.strftime('%H:%M')}", reply_markup=EMPTY_KB
     )

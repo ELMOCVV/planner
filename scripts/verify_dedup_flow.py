@@ -61,6 +61,13 @@ class FakeMessage:
         self.sent.append((text, reply_markup))
         return self
 
+    async def edit_reply_markup(self, reply_markup=None, **kwargs):
+        self.sent.append((self.sent[-1][0] if self.sent else "", reply_markup))
+        return self
+
+    async def delete(self):
+        pass
+
 
 class FakeCallback:
     def __init__(self, user_id: int, data: str, message: FakeMessage):

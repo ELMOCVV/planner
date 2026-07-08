@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message, TelegramObject
 from config import ALLOWED_USER_IDS, EXPORT_DIR
 from db.repo import count_active_reminders, count_notes, count_people, export_user_data, session_scope
 from handlers import people, reminders
+from handlers.ui import CLOSE_CALLBACK
 from services import conversation, llm_parser
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,19 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     conversation.clear(message.from_user.id)
     await message.answer("Отменил текущее действие.")
+
+
+@router.callback_query(F.data == CLOSE_CALLBACK)
+async def handle_close(callback: CallbackQuery) -> None:
+    """Shared "✖️ Закрыть" handler for persistent menus (person card,
+    people list, candidate list, reminders list) — deletes the message
+    outright rather than just stripping its buttons, so it stops
+    cluttering the chat entirely."""
+    try:
+        await callback.message.delete()
+    except Exception:
+        logger.warning("Failed to delete message on close", exc_info=True)
+    await callback.answer()
 
 
 @router.message(Command("stats"))
