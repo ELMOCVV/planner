@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message, TelegramObject
 from config import ALLOWED_USER_IDS, EXPORT_DIR
 from db.repo import count_active_reminders, count_notes, count_people, export_user_data, session_scope
 from handlers import people, reminders
-from services import llm_parser
+from services import conversation, llm_parser
 
 logger = logging.getLogger(__name__)
 router = Router(name="common")
@@ -76,6 +76,7 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
+    conversation.clear(message.from_user.id)
     await message.answer("Отменил текущее действие.")
 
 
@@ -117,16 +118,40 @@ async def cmd_export(message: Message) -> None:
         export_path.unlink(missing_ok=True)
 
 
+async def _reply(message: Message, text: str, **kwargs) -> None:
+    """message.answer wrapper that also records the bot's side of the
+    conversation, so the next classifier call can tell a short follow-up
+    reply ("сегодня", "в 12") apart from a fresh, standalone message."""
+    conversation.record_bot(message.from_user.id, text)
+    await message.answer(text, **kwargs)
+
+
 @router.message(F.text)
 async def dispatch_text(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
+    user_id = message.from_user.id
+
+    # Deterministic cancel/delete guard: only explicit keywords ever cancel
+    # anything. This runs before the LLM is even called, so ambiguous
+    # phrasing (e.g. "поздравить с днём рождения") can never be misread as
+    # a cancellation by a probabilistic classifier.
+    if conversation.is_explicit_cancel(text):
+        had_state = await state.get_state() is not None
+        await state.clear()
+        conversation.record_user(user_id, text)
+        reply = "Отменил текущее действие." if had_state else "Нечего отменять — сейчас ничего не выполняется."
+        await _reply(message, reply)
+        return
 
     month = people.detect_birthday_month_query(text)
     if month:
+        conversation.record_user(user_id, text)
         await people.start_birthday_month_query(message, month)
         return
 
-    parsed = await llm_parser.parse_message(text)
+    context = conversation.get_context_text(user_id)
+    conversation.record_user(user_id, text)
+    parsed = await llm_parser.parse_message(text, context=context)
     intent = parsed.get("intent")
 
     handlers_map: dict[str, Callable[[], Awaitable[Any]]] = {
@@ -147,10 +172,11 @@ async def dispatch_text(message: Message, state: FSMContext) -> None:
         return
 
     if intent == "chitchat" and parsed.get("reply_text"):
-        await message.answer(parsed["reply_text"])
+        await _reply(message, parsed["reply_text"])
         return
 
-    await message.answer(
+    await _reply(
+        message,
         "🤔 Не понял сообщение. Например, можно написать:\n"
-        "«позвонить бабушке сегодня в 12» или «новый знакомый Валера, любит рыбалку»."
+        "«позвонить бабушке сегодня в 12» или «новый знакомый Валера, любит рыбалку».",
     )

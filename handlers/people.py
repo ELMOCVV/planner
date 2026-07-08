@@ -19,7 +19,7 @@ from db.repo import (
 )
 import db.repo as repo
 from handlers.states import PersonFlow
-from services import birthdays
+from services import birthdays, conversation
 from services.person_matcher import find_matches, normalize
 
 logger = logging.getLogger(__name__)
@@ -52,24 +52,21 @@ def _facts_preview(facts: list[str], birthday_month: int | None, birthday_day: i
     return ", ".join(bits) if bits else "пока без деталей"
 
 
-async def start_add_person(message: Message, state: FSMContext, parsed: dict) -> None:
-    name = parsed.get("person_name")
-    if not name:
-        await message.answer("Не понял, о ком речь. Как зовут человека?")
-        return
+async def _ask_for_person_name(message: Message, state: FSMContext, prompt: str, pending_draft: dict) -> None:
+    """Bot doesn't know who the message is about — ask, and remember what
+    we already extracted so the reply only needs to supply the missing
+    name (rather than relying on a fresh, context-free classification of
+    a one-word reply like "Валера")."""
+    await state.update_data(pending_draft=pending_draft)
+    await state.set_state(PersonFlow.waiting_person_name)
+    conversation.record_bot(message.from_user.id, prompt)
+    await message.answer(prompt)
 
-    month, day, year = parse_birthday(parsed.get("birthday"))
-    facts = parsed.get("person_facts") or []
-    tag = parsed.get("person_tag")
 
-    draft = {
-        "name": name,
-        "tag": tag,
-        "month": month,
-        "day": day,
-        "year": year,
-        "facts": facts,
-    }
+async def _route_person_draft(message: Message, state: FSMContext, draft: dict, no_match_prompt: str) -> None:
+    name = draft["name"]
+    facts = draft.get("facts", [])
+    month, day = draft.get("month"), draft.get("day")
 
     async with session_scope() as session:
         matches = await find_matches(session, message.from_user.id, name)
@@ -85,9 +82,7 @@ async def start_add_person(message: Message, state: FSMContext, parsed: dict) ->
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="pplcreate:cancel")],
             ]
         )
-        await message.answer(
-            f"Создать нового человека? Имя: {name}. {preview}.", reply_markup=kb
-        )
+        await message.answer(no_match_prompt.format(name=name, preview=preview), reply_markup=kb)
         return
 
     if len(matches) == 1:
@@ -126,6 +121,56 @@ async def start_add_person(message: Message, state: FSMContext, parsed: dict) ->
     await message.answer("Нашёл несколько похожих, кто это?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
+async def start_add_person(message: Message, state: FSMContext, parsed: dict) -> None:
+    name = parsed.get("person_name")
+    month, day, year = parse_birthday(parsed.get("birthday"))
+    facts = parsed.get("person_facts") or []
+    tag = parsed.get("person_tag")
+
+    if not name:
+        await _ask_for_person_name(
+            message,
+            state,
+            "Не понял, о ком речь. Как зовут человека?",
+            {"purpose": "add_person", "tag": tag, "month": month, "day": day, "year": year, "facts": facts},
+        )
+        return
+
+    draft = {"name": name, "tag": tag, "month": month, "day": day, "year": year, "facts": facts}
+    await _route_person_draft(
+        message, state, draft, "Создать нового человека? Имя: {name}. {preview}."
+    )
+
+
+@router.message(PersonFlow.waiting_person_name)
+async def handle_person_name_reply(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    text = (message.text or "").strip()
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
+    conversation.record_user(user_id, text)
+    data = await state.get_data()
+    pending = data.get("pending_draft", {})
+    draft = {
+        "name": text,
+        "tag": pending.get("tag"),
+        "month": pending.get("month"),
+        "day": pending.get("day"),
+        "year": pending.get("year"),
+        "facts": pending.get("facts", []),
+    }
+
+    if pending.get("purpose") == "add_person_info":
+        await _route_person_draft(message, state, draft, "Не нашёл {name} в базе. Создать нового? {preview}.")
+    else:
+        await _route_person_draft(message, state, draft, "Создать нового человека? Имя: {name}. {preview}.")
+
+
 async def _create_person_from_draft(session, user_id: int, draft: dict):
     person = await repo.create_person(
         session,
@@ -159,7 +204,9 @@ async def handle_create_confirm(callback: CallbackQuery, state: FSMContext) -> N
     if action == "editname":
         await state.set_state(PersonFlow.waiting_name_edit)
         await callback.answer()
-        await callback.message.answer("Как зовут человека?")
+        reply = "Как зовут человека?"
+        conversation.record_bot(callback.from_user.id, reply)
+        await callback.message.answer(reply)
         return
 
     if action == "confirm":
@@ -172,9 +219,19 @@ async def handle_create_confirm(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.message(PersonFlow.waiting_name_edit)
 async def handle_name_edit(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
+    conversation.record_user(user_id, text)
     data = await state.get_data()
     draft = data.get("draft", {})
-    draft["name"] = message.text.strip()
+    draft["name"] = text
     async with session_scope() as session:
         person = await _create_person_from_draft(session, message.from_user.id, draft)
     await state.clear()
@@ -280,57 +337,16 @@ async def start_add_person_info(message: Message, state: FSMContext, parsed: dic
     month, day, year = parse_birthday(parsed.get("birthday"))
 
     if not name:
-        await message.answer("Не понял, о ком эта заметка. Уточни имя.")
+        await _ask_for_person_name(
+            message,
+            state,
+            "Не понял, о ком эта заметка. Уточни имя.",
+            {"purpose": "add_person_info", "month": month, "day": day, "year": year, "facts": facts},
+        )
         return
-
-    async with session_scope() as session:
-        matches = await find_matches(session, message.from_user.id, name)
 
     draft = {"name": name, "facts": facts, "month": month, "day": day, "year": year, "tag": None}
-
-    if not matches:
-        await state.update_data(draft=draft)
-        await state.set_state(PersonFlow.confirm_create)
-        preview = _facts_preview(facts, month, day)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Создать", callback_data="pplcreate:confirm")],
-                [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="pplcreate:editname")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="pplcreate:cancel")],
-            ]
-        )
-        await message.answer(
-            f"Не нашёл {name} в базе. Создать нового? {preview}.", reply_markup=kb
-        )
-        return
-
-    if len(matches) == 1:
-        person = matches[0].person
-        await state.update_data(draft=draft, existing_id=person.id)
-        await state.set_state(PersonFlow.confirm_add_existing)
-        preview = _facts_preview([n.text for n in person.notes], person.birthday_month, person.birthday_day)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да", callback_data=f"pplexist:yes:{person.id}")],
-                [InlineKeyboardButton(text="➕ Это другой", callback_data="pplexist:new")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="pplexist:cancel")],
-            ]
-        )
-        await message.answer(f"Добавляю к {person.name} ({preview})?", reply_markup=kb)
-        return
-
-    await state.update_data(draft=draft)
-    await state.set_state(PersonFlow.disambiguate)
-    rows = []
-    for m in matches[:6]:
-        preview = _facts_preview([n.text for n in m.person.notes], m.person.birthday_month, m.person.birthday_day)
-        tag_part = f" ({m.person.tag})" if m.person.tag else ""
-        rows.append(
-            [InlineKeyboardButton(text=f"{m.person.name}{tag_part} — {preview}", callback_data=f"ppldis:{m.person.id}")]
-        )
-    rows.append([InlineKeyboardButton(text=f"➕ Новый {name}", callback_data="ppldis:new")])
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="ppldis:cancel")])
-    await message.answer("Про кого из них?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await _route_person_draft(message, state, draft, "Не нашёл {name} в базе. Создать нового? {preview}.")
 
 
 async def start_add_alias(message: Message, parsed: dict) -> None:
@@ -527,15 +543,27 @@ async def handle_card_addnote(callback: CallbackQuery, state: FSMContext) -> Non
     await state.update_data(person_id=person_id)
     await state.set_state(PersonFlow.waiting_new_note)
     await callback.answer()
-    await callback.message.answer("Что добавить в заметки?")
+    reply = "Что добавить в заметки?"
+    conversation.record_bot(callback.from_user.id, reply)
+    await callback.message.answer(reply)
 
 
 @router.message(PersonFlow.waiting_new_note)
 async def handle_new_note_text(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    text = message.text
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
+    conversation.record_user(user_id, text)
     data = await state.get_data()
     person_id = data["person_id"]
     async with session_scope() as session:
-        await add_note(session, person_id, message.text)
+        await add_note(session, person_id, text)
         await session.commit()
         person = await get_person(session, person_id)
     await state.clear()
@@ -548,16 +576,28 @@ async def handle_card_rename(callback: CallbackQuery, state: FSMContext) -> None
     await state.update_data(person_id=person_id)
     await state.set_state(PersonFlow.waiting_rename)
     await callback.answer()
-    await callback.message.answer("Новое имя?")
+    reply = "Новое имя?"
+    conversation.record_bot(callback.from_user.id, reply)
+    await callback.message.answer(reply)
 
 
 @router.message(PersonFlow.waiting_rename)
 async def handle_rename_text(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
+    conversation.record_user(user_id, text)
     data = await state.get_data()
     person_id = data["person_id"]
     async with session_scope() as session:
         person = await get_person(session, person_id)
-        person.name = message.text.strip()
+        person.name = text
         await session.commit()
         person = await get_person(session, person_id)
     await state.clear()

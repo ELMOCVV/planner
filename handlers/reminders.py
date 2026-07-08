@@ -18,7 +18,7 @@ from db.repo import (
     session_scope,
 )
 from handlers.states import ReminderFlow
-from services import llm_parser, scheduler
+from services import conversation, llm_parser, scheduler
 
 logger = logging.getLogger(__name__)
 router = Router(name="reminders")
@@ -77,7 +77,9 @@ async def start_reminder_flow(message: Message, state: FSMContext, parsed: dict)
     if event_time is None or parsed.get("time_ambiguous"):
         await state.update_data(draft_text=text, recurrence_rule=recurrence)
         await state.set_state(ReminderFlow.waiting_time)
-        await message.answer("⏰ Когда напомнить?")
+        reply = "⏰ Когда напомнить?"
+        conversation.record_bot(message.from_user.id, reply)
+        await message.answer(reply)
         return
 
     now = dt.datetime.now(TZ)
@@ -126,11 +128,24 @@ async def _show_offsets(
 
 @router.message(ReminderFlow.waiting_time)
 async def handle_time_reply(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    text = message.text or ""
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
     data = await state.get_data()
-    parsed = await llm_parser.parse_message(message.text or "")
+    context = conversation.get_context_text(user_id)
+    conversation.record_user(user_id, text)
+    parsed = await llm_parser.parse_message(text, context=context)
     event_time = llm_parser.parse_event_time(parsed.get("event_time"))
     if event_time is None:
-        await message.answer("Не разобрал время. Попробуй ещё раз, например «завтра в 10:00».")
+        reply = "Не разобрал время. Попробуй ещё раз, например «завтра в 10:00»."
+        conversation.record_bot(user_id, reply)
+        await message.answer(reply)
         return
     recurrence = data.get("recurrence_rule") or parsed.get("recurrence_rule")
     await _show_offsets(message, state, data.get("draft_text", message.text), event_time, recurrence)
@@ -178,7 +193,9 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
     if action == "custom":
         await state.set_state(ReminderFlow.waiting_custom_offset)
         await callback.answer()
-        await callback.message.answer("За сколько напомнить? Например «за 40 минут» или «за день».")
+        reply = "За сколько напомнить? Например «за 40 минут» или «за день»."
+        conversation.record_bot(callback.from_user.id, reply)
+        await callback.message.answer(reply)
         return
 
     if action == "done":
@@ -209,9 +226,21 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.message(ReminderFlow.waiting_custom_offset)
 async def handle_custom_offset(message: Message, state: FSMContext) -> None:
-    minutes = await llm_parser.parse_offset_minutes(message.text or "")
+    user_id = message.from_user.id
+    text = message.text or ""
+
+    if conversation.is_explicit_cancel(text):
+        await state.clear()
+        conversation.record_user(user_id, text)
+        await message.answer("Отменил текущее действие.")
+        return
+
+    conversation.record_user(user_id, text)
+    minutes = await llm_parser.parse_offset_minutes(text)
     if minutes is None:
-        await message.answer("Не понял. Попробуй, например, «за 40 минут» или «за 2 часа».")
+        reply = "Не понял. Попробуй, например, «за 40 минут» или «за 2 часа»."
+        conversation.record_bot(user_id, reply)
+        await message.answer(reply)
         return
     data = await state.get_data()
     selected: list[int] = list(data.get("selected_offsets", [0]))
