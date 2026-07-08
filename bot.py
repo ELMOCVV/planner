@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from db.repo import init_db
-from handlers import common, people, reminders
+from handlers import common, people, reminders, settings
 from handlers.common import AccessControlMiddleware
 from services.birthdays import sync_all_birthday_reminders
 from services.scheduler import init_scheduler
@@ -53,6 +53,7 @@ async def main() -> None:
 
     dp.include_router(reminders.router)
     dp.include_router(people.router)
+    dp.include_router(settings.router)
     dp.include_router(common.router)
 
     init_scheduler(bot)

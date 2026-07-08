@@ -173,8 +173,14 @@ CASES = [
         [expect_llm_called(False), expect_reply_contains("Нечего отменять")],
     ),
     (
+        # Uses a relative offset ("через 2 часа") rather than a fixed
+        # clock time so this case can't flake depending on what time of
+        # day the eval happens to run (a fixed "в 15 30" is in the past
+        # after 15:30 local time, which correctly triggers the "already
+        # passed, reschedule?" flow instead of the offsets menu — that's
+        # not a bug, just a different, still-correct, branch).
         "congrats + explicit time (previously-fixed bug, full path)",
-        "Поздравить с днем рождения Валеру в 15 30",
+        "Поздравить с днем рождения Валеру через 2 часа",
         [expect_llm_called(True), expect_reply_contains("Напоминание")],
     ),
     (

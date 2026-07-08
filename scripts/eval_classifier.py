@@ -188,6 +188,32 @@ CASES = [
         None,
         [expect_intent("create_reminder"), expect_time_hhmm("09:00")],
     ),
+    # --- Bare time-of-day (used by /settings' custom-time input via
+    #     llm_parser.parse_time_of_day, not a full reminder message) ---
+    (
+        "bare time: space instead of colon",
+        "16 45",
+        None,
+        [expect_time_hhmm("16:45"), expect_time_ambiguous(False)],
+    ),
+    (
+        "bare time: colon",
+        "16:45",
+        None,
+        [expect_time_hhmm("16:45"), expect_time_ambiguous(False)],
+    ),
+    (
+        "bare time: N вечера",
+        "в 5 вечера",
+        None,
+        [expect_time_hhmm("17:00"), expect_time_ambiguous(False)],
+    ),
+    (
+        "bare time: N утра",
+        "9 утра",
+        None,
+        [expect_time_hhmm("09:00"), expect_time_ambiguous(False)],
+    ),
     # --- Other intents (regression guard, not part of the reported bugs) ---
     (
         "list_reminders",

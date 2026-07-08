@@ -19,3 +19,7 @@ class PersonFlow(StatesGroup):
     waiting_person_name = State()
     candidates = State()
     confirm_alias_on_create = State()
+
+
+class SettingsFlow(StatesGroup):
+    waiting_custom_time = State()

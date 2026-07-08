@@ -11,6 +11,7 @@ from db.repo import (
     create_reminder,
     delete_reminder,
     get_reminder,
+    get_user_settings,
     list_alerts,
     list_people_with_birthday,
     session_scope,
@@ -22,18 +23,38 @@ logger = logging.getLogger(__name__)
 TZ = ZoneInfo(TIMEZONE)
 
 
-def _alert_hour_minute() -> tuple[int, int]:
+def _parse_hhmm(value: str | None, fallback: tuple[int, int] = (15, 0)) -> tuple[int, int]:
+    if not value:
+        return fallback
     try:
-        hour_s, minute_s = BIRTHDAY_ALERT_TIME.split(":")
+        hour_s, minute_s = value.split(":")
         return int(hour_s), int(minute_s)
     except (ValueError, AttributeError):
-        logger.warning("Invalid BIRTHDAY_ALERT_TIME=%r, falling back to 15:00", BIRTHDAY_ALERT_TIME)
-        return 15, 0
+        logger.warning("Invalid time string %r, falling back to %02d:%02d", value, *fallback)
+        return fallback
 
 
-def _next_birthday_dt(month: int, day: int) -> dt.datetime:
+def _default_alert_hour_minute() -> tuple[int, int]:
+    return _parse_hhmm(BIRTHDAY_ALERT_TIME)
+
+
+async def get_effective_alert_time(session: AsyncSession, user_id: int) -> tuple[int, int]:
+    """A user's own /settings override, falling back to the
+    BIRTHDAY_ALERT_TIME env var default."""
+    settings = await get_user_settings(session, user_id)
+    if settings and settings.birthday_alert_time:
+        return _parse_hhmm(settings.birthday_alert_time, fallback=_default_alert_hour_minute())
+    return _default_alert_hour_minute()
+
+
+async def get_effective_alert_time_str(user_id: int) -> str:
+    async with session_scope() as session:
+        hour, minute = await get_effective_alert_time(session, user_id)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _next_birthday_dt(month: int, day: int, hour: int, minute: int) -> dt.datetime:
     now = dt.datetime.now(TZ)
-    hour, minute = _alert_hour_minute()
     try:
         candidate = dt.datetime(now.year, month, day, hour, minute, tzinfo=TZ)
     except ValueError:
@@ -69,7 +90,8 @@ async def sync_birthday_reminders(session: AsyncSession, person: Person) -> None
         await session.flush()
         return
 
-    event_time = _next_birthday_dt(person.birthday_month, person.birthday_day)
+    hour, minute = await get_effective_alert_time(session, person.user_id)
+    event_time = _next_birthday_dt(person.birthday_month, person.birthday_day, hour, minute)
     reminder = await create_reminder(
         session,
         person.user_id,
@@ -102,6 +124,43 @@ async def _reminder_is_healthy(session: AsyncSession, person: Person) -> bool:
     if not alerts:
         return False
     return any(a.job_id and scheduler.scheduler.get_job(a.job_id) for a in alerts)
+
+
+async def reschedule_all_for_user(user_id: int) -> int:
+    """Re-create every one of this user's yearly birthday reminders using
+    their current effective alert time. Call this right after saving a new
+    /settings time (the setting must already be persisted — this function
+    re-reads it via get_effective_alert_time) so the change takes effect
+    immediately, not on the next restart."""
+    count = 0
+    async with session_scope() as session:
+        people = await list_people_with_birthday(session, user_id=user_id)
+        for person in people:
+            await sync_birthday_reminders(session, person)
+            count += 1
+        await session.commit()
+    return count
+
+
+async def schedule_test_alert(user_id: int, minutes_from_now: int = 2) -> dt.datetime:
+    """Schedule a one-off birthday-style alert through the real scheduler
+    and jobstore (not a direct send) — this exercises the exact same
+    create_reminder/add_alert/schedule_alert/fire_alert path a real
+    birthday reminder uses, so if this test message arrives, real ones
+    will too."""
+    fire_time = dt.datetime.now(TZ) + dt.timedelta(minutes=minutes_from_now)
+    async with session_scope() as session:
+        reminder = await create_reminder(
+            session,
+            user_id,
+            "🎂 Тест: сегодня день рождения у Тестового Валеры!",
+            fire_time,
+            recurrence_rule=None,
+        )
+        alert = await add_alert(session, reminder.id, fire_time, "on_time")
+        alert.job_id = scheduler.schedule_alert(alert.id, fire_time)
+        await session.commit()
+    return fire_time
 
 
 async def sync_all_birthday_reminders() -> None:

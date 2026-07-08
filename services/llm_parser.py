@@ -52,6 +52,12 @@ alias_target = X (алиас), person_name = Y (основное имя),
 "в 21" = 21:00.
 - Разговорные обозначения времени: "в пол шестого" = 17:30, "в полдень" = 12:00, \
 "в полночь" = 00:00, "утром" без числа = time_ambiguous true.
+- "N вечера" = (N+12):00, например "5 вечера" = 17:00. "N утра" = N:00. \
+"N дня" = N:00 (обычно 12-17). "N ночи" = N:00 (обычно 0-4).
+- Если сообщение — это ПРОСТО время (например "16 45", "16:45", "в 5 вечера") \
+без какого-либо другого текста, всё равно заполни event_time датой __TODAY_DATE__ \
+и этим временем, time_ambiguous = false — даже если непонятно, что за intent \
+(тогда intent = "unknown", это нормально, важно только время).
 - Если названо только "сегодня"/"завтра"/день недели БЕЗ конкретного часа — \
 event_time остаётся null (или содержит только дату, если это осмысленно), а \
 time_ambiguous = true, потому что час всё равно не известен.
@@ -128,6 +134,12 @@ birthday_query_month = номер месяца.
 
 Вход: "У кого др в июле?"
 → {"intent": "query_person", "person_name": null, "birthday_query_month": 7}
+
+Вход: "16 45"
+→ {"intent": "unknown", "event_time": "__TODAY_DATE__ 16:45", "time_ambiguous": false}
+
+Вход: "в 5 вечера"
+→ {"intent": "unknown", "event_time": "__TODAY_DATE__ 17:00", "time_ambiguous": false}
 
 Пример с контекстом (история диалога перед последним сообщением):
 История:
@@ -269,3 +281,15 @@ def parse_event_time(event_time: str | None) -> dt.datetime | None:
     except ValueError:
         return None
     return naive.replace(tzinfo=tz)
+
+
+async def parse_time_of_day(text: str) -> tuple[int, int] | None:
+    """Parse a bare time-of-day expression ("16:45", "16 45", "в 5 вечера")
+    via the same classifier used everywhere else — reused here (rather
+    than a separate parser) for /settings' custom-time input. Only the
+    hour/minute are used; whatever date the classifier infers is ignored."""
+    parsed = await parse_message(text)
+    event_dt = parse_event_time(parsed.get("event_time"))
+    if event_dt is None or parsed.get("time_ambiguous"):
+        return None
+    return event_dt.hour, event_dt.minute
