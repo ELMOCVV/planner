@@ -88,3 +88,14 @@ class ReminderAlert(Base):
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     reminder: Mapped["Reminder"] = relationship(back_populates="alerts")
+
+
+class UserSettings(Base):
+    """Per-user preference overrides. Any field left null falls back to
+    the corresponding env-var default (see config.py / services/birthdays.py)."""
+
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    birthday_alert_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

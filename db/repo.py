@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import selectinload
 
 from config import DB_URL
-from db.models import Base, Person, PersonAlias, PersonNote, Reminder, ReminderAlert
+from db.models import Base, Person, PersonAlias, PersonNote, Reminder, ReminderAlert, UserSettings
 
 engine = create_async_engine(DB_URL, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
@@ -151,12 +151,14 @@ async def search_notes(session: AsyncSession, user_id: int, query: str) -> list[
     return list(res2.scalars().all())
 
 
-async def list_people_with_birthday(session: AsyncSession) -> list[Person]:
-    """All people (any user) that have a birthday set. Used for the
-    startup idempotent birthday-reminder sync."""
-    res = await session.execute(
-        select(Person).where(Person.birthday_month.is_not(None), Person.birthday_day.is_not(None))
-    )
+async def list_people_with_birthday(session: AsyncSession, user_id: int | None = None) -> list[Person]:
+    """People (any user, unless user_id is given) that have a birthday
+    set. Used for the startup idempotent birthday-reminder sync and for
+    rescheduling a single user's birthday reminders after a settings change."""
+    stmt = select(Person).where(Person.birthday_month.is_not(None), Person.birthday_day.is_not(None))
+    if user_id is not None:
+        stmt = stmt.where(Person.user_id == user_id)
+    res = await session.execute(stmt)
     return list(res.scalars().all())
 
 
@@ -191,6 +193,30 @@ async def people_with_birthday_on(
     if day is not None:
         stmt = stmt.where(Person.birthday_day == day)
     res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+# ---------- User settings ----------
+
+
+async def get_user_settings(session: AsyncSession, user_id: int) -> UserSettings | None:
+    res = await session.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    return res.scalar_one_or_none()
+
+
+async def set_birthday_alert_time(session: AsyncSession, user_id: int, hhmm: str) -> UserSettings:
+    settings = await get_user_settings(session, user_id)
+    if settings is None:
+        settings = UserSettings(user_id=user_id, birthday_alert_time=hhmm)
+        session.add(settings)
+    else:
+        settings.birthday_alert_time = hhmm
+    await session.flush()
+    return settings
+
+
+async def list_all_user_settings(session: AsyncSession) -> list[UserSettings]:
+    res = await session.execute(select(UserSettings))
     return list(res.scalars().all())
 
 
@@ -315,9 +341,14 @@ async def export_user_data(session: AsyncSession, user_id: int) -> dict:
             }
         )
 
+    settings = await get_user_settings(session, user_id)
+
     return {
         "exported_at": dt.datetime.utcnow().isoformat(),
         "user_id": user_id,
         "people": people_data,
         "reminders": reminders_data,
+        "settings": {
+            "birthday_alert_time": settings.birthday_alert_time if settings else None,
+        },
     }
