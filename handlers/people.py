@@ -1,6 +1,5 @@
 import datetime as dt
 import logging
-import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -554,22 +553,6 @@ def _person_card_kb(person_id: int) -> InlineKeyboardMarkup:
     )
 
 
-MONTHS_RU = {
-    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
-    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
-}
-
-
-def detect_birthday_month_query(text: str) -> int | None:
-    lowered = text.lower()
-    if "рожден" not in lowered and "др" not in lowered:
-        return None
-    for stem, month in MONTHS_RU.items():
-        if re.search(stem, lowered):
-            return month
-    return None
-
-
 async def start_birthday_month_query(message: Message, month: int) -> None:
     async with session_scope() as session:
         people = await repo.people_with_birthday_on(session, message.from_user.id, month)
@@ -591,6 +574,10 @@ async def start_birthday_month_query(message: Message, month: int) -> None:
 async def start_query_person(message: Message, parsed: dict) -> None:
     name = parsed.get("person_name")
     if not name:
+        month = parsed.get("birthday_query_month")
+        if month:
+            await start_birthday_month_query(message, month)
+            return
         await message.answer("О ком рассказать? Уточни имя.")
         return
     async with session_scope() as session:
