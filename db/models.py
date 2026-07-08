@@ -30,7 +30,6 @@ class Person(Base):
     birthday_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     birthday_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     birthday_reminder_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    birthday_reminder_before_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
 
     aliases: Mapped[list["PersonAlias"]] = relationship(

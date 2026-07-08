@@ -11,6 +11,7 @@ import config
 from db.repo import init_db
 from handlers import common, people, reminders
 from handlers.common import AccessControlMiddleware
+from services.birthdays import sync_all_birthday_reminders
 from services.scheduler import init_scheduler
 
 
@@ -35,6 +36,10 @@ async def main() -> None:
     if not config.ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY is not set — message parsing will fail.")
 
+    logger.info("DATA_DIR resolved to: %s", config.DATA_DIR)
+    logger.info("Main DB path: %s", config.DB_PATH)
+    logger.info("Scheduler jobstore DB path: %s", config.SCHEDULER_DB_PATH)
+
     await init_db()
 
     bot = Bot(
@@ -51,6 +56,7 @@ async def main() -> None:
     dp.include_router(common.router)
 
     init_scheduler(bot)
+    await sync_all_birthday_reminders()
 
     logger.info("Bot started")
     try:
