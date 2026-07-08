@@ -1,0 +1,113 @@
+import logging
+from typing import Any, Awaitable, Callable
+
+from aiogram import BaseMiddleware, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message, TelegramObject
+
+from config import ALLOWED_USER_IDS
+from handlers import people, reminders
+from services import llm_parser
+
+logger = logging.getLogger(__name__)
+router = Router(name="common")
+
+START_TEXT = (
+    "👋 Привет! Я твой личный помощник.\n\n"
+    "Примеры того, что мне можно написать:\n"
+    "⏰ «позвонить бабушке сегодня в 12»\n"
+    "👤 «новый знакомый Валера, день рождения 12 июля, любит рыбалку»\n"
+    "📝 «у Валеры есть собака Рекс»\n"
+    "🔎 «кто любит рыбалку?»\n"
+    "📋 «мои напоминания» / «мои люди»\n\n"
+    "Используй /help для подробностей."
+)
+
+HELP_TEXT = (
+    "ℹ️ Что я умею:\n\n"
+    "⏰ Напоминания — просто напиши, что и когда напомнить. Могу спросить, "
+    "за сколько предупредить заранее, и умею повторяющиеся напоминания "
+    "(«каждый день в 9», «каждый понедельник»).\n"
+    "/reminders — список активных напоминаний.\n\n"
+    "👤 Люди — расскажи о новом знакомом, я сохраню карточку. Дальше просто "
+    "пиши новые факты о нём («Валера теперь работает в такси»), я сам пойму, "
+    "к кому это относится (и переспрошу, если не уверен).\n"
+    "/people — список всех людей.\n\n"
+    "🎂 Если укажешь день рождения — заранее напомню за день и в сам день.\n"
+    "🔎 Спроси «кто любит рыбалку?» или «что я знаю про Валеру?» — найду по заметкам.\n\n"
+    "Если не пойму сообщение — просто честно скажу и попрошу переформулировать."
+)
+
+
+class AccessControlMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user is not None and ALLOWED_USER_IDS and user.id not in ALLOWED_USER_IDS:
+            if isinstance(event, Message):
+                await event.answer("Это приватный бот 🔒")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Это приватный бот 🔒", show_alert=True)
+            return None
+        return await handler(event, data)
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(START_TEXT)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(HELP_TEXT)
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменил текущее действие.")
+
+
+@router.message(F.text)
+async def dispatch_text(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+
+    month = people.detect_birthday_month_query(text)
+    if month:
+        await people.start_birthday_month_query(message, month)
+        return
+
+    parsed = await llm_parser.parse_message(text)
+    intent = parsed.get("intent")
+
+    handlers_map: dict[str, Callable[[], Awaitable[Any]]] = {
+        "create_reminder": lambda: reminders.start_reminder_flow(message, state, parsed),
+        "list_reminders": lambda: reminders.show_reminders_list(message),
+        "delete_reminder": lambda: reminders.show_reminders_list(message),
+        "add_person": lambda: people.start_add_person(message, state, parsed),
+        "add_person_info": lambda: people.start_add_person_info(message, state, parsed),
+        "add_alias": lambda: people.start_add_alias(message, parsed),
+        "query_person": lambda: people.start_query_person(message, parsed),
+        "list_people": lambda: people.show_people_list(message),
+        "search_notes": lambda: people.start_search_notes(message, parsed),
+    }
+
+    action = handlers_map.get(intent)
+    if action is not None:
+        await action()
+        return
+
+    if intent == "chitchat" and parsed.get("reply_text"):
+        await message.answer(parsed["reply_text"])
+        return
+
+    await message.answer(
+        "🤔 Не понял сообщение. Например, можно написать:\n"
+        "«позвонить бабушке сегодня в 12» или «новый знакомый Валера, любит рыбалку»."
+    )
