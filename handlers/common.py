@@ -157,12 +157,6 @@ async def dispatch_text(message: Message, state: FSMContext) -> None:
         await _reply(message, reply)
         return
 
-    month = people.detect_birthday_month_query(text)
-    if month:
-        conversation.record_user(user_id, text)
-        await people.start_birthday_month_query(message, month)
-        return
-
     context = conversation.get_context_text(user_id)
     conversation.record_user(user_id, text)
     parsed = await llm_parser.parse_message(text, context=context)

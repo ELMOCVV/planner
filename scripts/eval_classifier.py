@@ -64,6 +64,14 @@ def expect_birthday_today():
     return check
 
 
+def expect_birthday_query_month(month: int):
+    def check(parsed: dict) -> tuple[bool, str]:
+        ok = parsed.get("birthday_query_month") == month
+        return ok, f"birthday_query_month={parsed.get('birthday_query_month')!r} (expected {month})"
+
+    return check
+
+
 def expect_birthday_mmdd(mmdd: str):
     def check(parsed: dict) -> tuple[bool, str]:
         birthday = parsed.get("birthday") or ""
@@ -240,7 +248,7 @@ CASES = [
         "birthday question about a month (list)",
         "У кого др в июле?",
         None,
-        [expect_intent("query_person"), expect_person_name(None)],
+        [expect_intent("query_person"), expect_person_name(None), expect_birthday_query_month(7)],
     ),
     (
         "list_people",
