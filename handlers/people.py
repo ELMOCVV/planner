@@ -20,7 +20,7 @@ from db.repo import (
 import db.repo as repo
 from handlers.states import PersonFlow
 from services import birthdays, conversation
-from services.person_matcher import find_matches, normalize
+from services.person_matcher import CREATE_MATCH_THRESHOLD, find_matches, normalize
 
 logger = logging.getLogger(__name__)
 router = Router(name="people")
@@ -63,26 +63,132 @@ async def _ask_for_person_name(message: Message, state: FSMContext, prompt: str,
     await message.answer(prompt)
 
 
+async def _show_create_confirm(message: Message, state: FSMContext, draft: dict, prompt_template: str) -> None:
+    await state.update_data(draft=draft)
+    await state.set_state(PersonFlow.confirm_create)
+    preview = _facts_preview(draft.get("facts", []), draft.get("month"), draft.get("day"))
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Создать", callback_data="pplcreate:confirm")],
+            [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="pplcreate:editname")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="pplcreate:cancel")],
+        ]
+    )
+    await message.answer(
+        prompt_template.format(name=draft["name"], preview=preview), reply_markup=kb
+    )
+
+
+async def _route_new_person_draft(message: Message, state: FSMContext, draft: dict) -> None:
+    """Matching for the person-CREATE flow specifically: a looser
+    threshold (Russian diminutives like Валерчик/Валера/Валеныч score
+    below the strict 80 threshold used elsewhere, since token_set_ratio
+    alone doesn't know they're the same name) and a candidate-list UX —
+    a false positive here just means one extra button to look at, nothing
+    is written until the user picks something."""
+    name = draft["name"]
+
+    async with session_scope() as session:
+        matches = await find_matches(session, message.from_user.id, name, threshold=CREATE_MATCH_THRESHOLD)
+
+    if not matches:
+        await _show_create_confirm(message, state, draft, "Создать нового человека? Имя: {name}. {preview}.")
+        return
+
+    top = matches[:3]
+    await state.update_data(draft=draft)
+    await state.set_state(PersonFlow.candidates)
+    rows = []
+    for m in top:
+        preview = _facts_preview([n.text for n in m.person.notes], m.person.birthday_month, m.person.birthday_day)
+        tag_part = f" ({m.person.tag})" if m.person.tag else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"👤 {m.person.name}{tag_part} ({preview})",
+                    callback_data=f"ppldup:{m.person.id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=f"➕ Нет, создать нового: {name}", callback_data="ppldup:new")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="ppldup:cancel")])
+    await message.answer(
+        "Нашёл похожих. Это кто-то из них?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+
+
+@router.callback_query(F.data.startswith("ppldup:"))
+async def handle_dup_candidate(callback: CallbackQuery, state: FSMContext) -> None:
+    choice = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    draft = data.get("draft", {})
+
+    if choice == "cancel":
+        await state.clear()
+        await callback.message.edit_text("❌ Отменено.")
+        await callback.answer()
+        return
+
+    if choice == "new":
+        await callback.answer()
+        await _show_create_confirm(
+            callback.message, state, draft, "Создать нового человека? Имя: {name}. {preview}."
+        )
+        return
+
+    person_id = int(choice)
+    await state.update_data(draft=draft)
+    await state.set_state(PersonFlow.confirm_alias_on_create)
+    async with session_scope() as session:
+        person = await get_person(session, person_id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data=f"pplaliasyn:yes:{person_id}"),
+                InlineKeyboardButton(text="❌ Нет", callback_data=f"pplaliasyn:no:{person_id}"),
+            ]
+        ]
+    )
+    await callback.message.edit_text(
+        f"Добавить «{draft['name']}» как алиас к {person.name}?", reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pplaliasyn:"))
+async def handle_alias_yes_no(callback: CallbackQuery, state: FSMContext) -> None:
+    _, choice, person_id_s = callback.data.split(":")
+    person_id = int(person_id_s)
+    data = await state.get_data()
+    draft = data.get("draft", {})
+
+    async with session_scope() as session:
+        if choice == "yes":
+            await add_alias(session, person_id, draft["name"])
+        for fact in draft.get("facts", []):
+            await add_note(session, person_id, fact)
+        month, day = draft.get("month"), draft.get("day")
+        person = await get_person(session, person_id)
+        if month and day:
+            person.birthday_month, person.birthday_day, person.birthday_year = month, day, draft.get("year")
+            await birthdays.sync_birthday_reminders(session, person)
+        await session.commit()
+        person = await get_person(session, person_id)
+
+    await state.clear()
+    suffix = " (сохранил «{}» как алиас)".format(draft["name"]) if choice == "yes" else ""
+    await callback.message.edit_text(f"✅ Добавил к {person.name}{suffix}.")
+    await callback.answer()
+
+
 async def _route_person_draft(message: Message, state: FSMContext, draft: dict, no_match_prompt: str) -> None:
     name = draft["name"]
-    facts = draft.get("facts", [])
-    month, day = draft.get("month"), draft.get("day")
 
     async with session_scope() as session:
         matches = await find_matches(session, message.from_user.id, name)
 
     if not matches:
-        await state.update_data(draft=draft)
-        await state.set_state(PersonFlow.confirm_create)
-        preview = _facts_preview(facts, month, day)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Создать", callback_data="pplcreate:confirm")],
-                [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="pplcreate:editname")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="pplcreate:cancel")],
-            ]
-        )
-        await message.answer(no_match_prompt.format(name=name, preview=preview), reply_markup=kb)
+        await _show_create_confirm(message, state, draft, no_match_prompt)
         return
 
     if len(matches) == 1:
@@ -137,9 +243,7 @@ async def start_add_person(message: Message, state: FSMContext, parsed: dict) ->
         return
 
     draft = {"name": name, "tag": tag, "month": month, "day": day, "year": year, "facts": facts}
-    await _route_person_draft(
-        message, state, draft, "Создать нового человека? Имя: {name}. {preview}."
-    )
+    await _route_new_person_draft(message, state, draft)
 
 
 @router.message(PersonFlow.waiting_person_name)
@@ -168,7 +272,7 @@ async def handle_person_name_reply(message: Message, state: FSMContext) -> None:
     if pending.get("purpose") == "add_person_info":
         await _route_person_draft(message, state, draft, "Не нашёл {name} в базе. Создать нового? {preview}.")
     else:
-        await _route_person_draft(message, state, draft, "Создать нового человека? Имя: {name}. {preview}.")
+        await _route_new_person_draft(message, state, draft)
 
 
 async def _create_person_from_draft(session, user_id: int, draft: dict):
