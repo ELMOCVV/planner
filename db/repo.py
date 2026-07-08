@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
@@ -92,6 +92,10 @@ async def list_people(session: AsyncSession, user_id: int) -> list[Person]:
 
 
 async def delete_person(session: AsyncSession, person_id: int) -> None:
+    # Same cascade caveat as delete_reminder: bulk deletes skip the ORM
+    # relationship cascade, so aliases/notes must be removed explicitly.
+    await session.execute(delete(PersonAlias).where(PersonAlias.person_id == person_id))
+    await session.execute(delete(PersonNote).where(PersonNote.person_id == person_id))
     await session.execute(delete(Person).where(Person.id == person_id))
 
 
@@ -147,6 +151,39 @@ async def search_notes(session: AsyncSession, user_id: int, query: str) -> list[
     return list(res2.scalars().all())
 
 
+async def list_people_with_birthday(session: AsyncSession) -> list[Person]:
+    """All people (any user) that have a birthday set. Used for the
+    startup idempotent birthday-reminder sync."""
+    res = await session.execute(
+        select(Person).where(Person.birthday_month.is_not(None), Person.birthday_day.is_not(None))
+    )
+    return list(res.scalars().all())
+
+
+async def count_people(session: AsyncSession, user_id: int) -> int:
+    res = await session.execute(select(func.count()).select_from(Person).where(Person.user_id == user_id))
+    return res.scalar_one()
+
+
+async def count_notes(session: AsyncSession, user_id: int) -> int:
+    res = await session.execute(
+        select(func.count())
+        .select_from(PersonNote)
+        .join(Person, Person.id == PersonNote.person_id)
+        .where(Person.user_id == user_id)
+    )
+    return res.scalar_one()
+
+
+async def count_active_reminders(session: AsyncSession, user_id: int) -> int:
+    res = await session.execute(
+        select(func.count())
+        .select_from(Reminder)
+        .where(Reminder.user_id == user_id, Reminder.status == "active")
+    )
+    return res.scalar_one()
+
+
 async def people_with_birthday_on(
     session: AsyncSession, user_id: int, month: int, day: int | None = None
 ) -> list[Person]:
@@ -190,6 +227,11 @@ async def list_active_reminders(session: AsyncSession, user_id: int) -> list[Rem
 
 
 async def delete_reminder(session: AsyncSession, reminder_id: int) -> None:
+    # Bulk deletes bypass the ORM's relationship cascade, and SQLite doesn't
+    # enforce foreign keys by default — so child alerts must be deleted
+    # explicitly, or they can resurface as orphans if a later reminder
+    # reuses this rowid (plain INTEGER PRIMARY KEY reuses freed rowids).
+    await session.execute(delete(ReminderAlert).where(ReminderAlert.reminder_id == reminder_id))
     await session.execute(delete(Reminder).where(Reminder.id == reminder_id))
 
 
@@ -222,3 +264,60 @@ async def mark_alert_fired(session: AsyncSession, alert_id: int) -> None:
     alert = await get_alert(session, alert_id)
     if alert:
         alert.fired = True
+
+
+# ---------- Export ----------
+
+
+async def export_user_data(session: AsyncSession, user_id: int) -> dict:
+    """Full dump of a user's people (with aliases/notes) and reminders
+    (with alerts), as plain JSON-serializable data — the backup safety
+    net for /export."""
+    people = await list_people(session, user_id)
+    people_data = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "tag": p.tag,
+            "birthday_month": p.birthday_month,
+            "birthday_day": p.birthday_day,
+            "birthday_year": p.birthday_year,
+            "created_at": p.created_at.isoformat(),
+            "aliases": [a.alias for a in p.aliases],
+            "notes": [
+                {"text": n.text, "created_at": n.created_at.isoformat()} for n in p.notes
+            ],
+        }
+        for p in people
+    ]
+
+    res = await session.execute(select(Reminder).where(Reminder.user_id == user_id).order_by(Reminder.event_time))
+    reminders = list(res.scalars().all())
+    reminders_data = []
+    for r in reminders:
+        alerts = await list_alerts(session, r.id)
+        reminders_data.append(
+            {
+                "id": r.id,
+                "text": r.text,
+                "event_time": r.event_time.isoformat(),
+                "status": r.status,
+                "recurrence_rule": r.recurrence_rule,
+                "created_at": r.created_at.isoformat(),
+                "alerts": [
+                    {
+                        "fire_time": a.fire_time.isoformat(),
+                        "label": a.label,
+                        "fired": a.fired,
+                    }
+                    for a in alerts
+                ],
+            }
+        )
+
+    return {
+        "exported_at": dt.datetime.utcnow().isoformat(),
+        "user_id": user_id,
+        "people": people_data,
+        "reminders": reminders_data,
+    }

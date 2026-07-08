@@ -1,12 +1,15 @@
+import datetime as dt
+import json
 import logging
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, FSInputFile, Message, TelegramObject
 
-from config import ALLOWED_USER_IDS
+from config import ALLOWED_USER_IDS, EXPORT_DIR
+from db.repo import count_active_reminders, count_notes, count_people, export_user_data, session_scope
 from handlers import people, reminders
 from services import llm_parser
 
@@ -34,8 +37,10 @@ HELP_TEXT = (
     "пиши новые факты о нём («Валера теперь работает в такси»), я сам пойму, "
     "к кому это относится (и переспрошу, если не уверен).\n"
     "/people — список всех людей.\n\n"
-    "🎂 Если укажешь день рождения — заранее напомню за день и в сам день.\n"
+    "🎂 Если укажешь день рождения — я сам заведу ежегодное напоминание.\n"
     "🔎 Спроси «кто любит рыбалку?» или «что я знаю про Валеру?» — найду по заметкам.\n\n"
+    "/export — выгрузить всё в JSON-файл (бэкап).\n"
+    "/stats — сколько людей, заметок и активных напоминаний сейчас в базе.\n\n"
     "Если не пойму сообщение — просто честно скажу и попрошу переформулировать."
 )
 
@@ -72,6 +77,44 @@ async def cmd_help(message: Message) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Отменил текущее действие.")
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    user_id = message.from_user.id
+    async with session_scope() as session:
+        people_count = await count_people(session, user_id)
+        notes_count = await count_notes(session, user_id)
+        reminders_count = await count_active_reminders(session, user_id)
+    await message.answer(
+        "📊 Статистика:\n"
+        f"👤 Людей: {people_count}\n"
+        f"📝 Заметок: {notes_count}\n"
+        f"⏰ Активных напоминаний: {reminders_count}"
+    )
+
+
+@router.message(Command("export"))
+async def cmd_export(message: Message) -> None:
+    user_id = message.from_user.id
+    async with session_scope() as session:
+        data = await export_user_data(session, user_id)
+
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_path = EXPORT_DIR / f"export_{user_id}_{timestamp}.json"
+    export_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    try:
+        await message.answer_document(
+            FSInputFile(export_path, filename=export_path.name),
+            caption=(
+                f"📦 Бэкап: {len(data['people'])} человек, "
+                f"{len(data['reminders'])} напоминаний."
+            ),
+        )
+    finally:
+        export_path.unlink(missing_ok=True)
 
 
 @router.message(F.text)
