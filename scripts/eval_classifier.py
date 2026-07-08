@@ -64,6 +64,23 @@ def expect_birthday_today():
     return check
 
 
+def expect_birthday_mmdd(mmdd: str):
+    def check(parsed: dict) -> tuple[bool, str]:
+        birthday = parsed.get("birthday") or ""
+        ok = birthday == mmdd or birthday.endswith(mmdd)
+        return ok, f"birthday={birthday!r} (expected ...{mmdd})"
+
+    return check
+
+
+def expect_person_name(name: str | None):
+    def check(parsed: dict) -> tuple[bool, str]:
+        ok = parsed.get("person_name") == name
+        return ok, f"person_name={parsed.get('person_name')!r} (expected {name!r})"
+
+    return check
+
+
 # Each case: (label, text, context, [checks])
 CASES = [
     # --- Reported failure #1: congratulation phrasing with explicit time ---
@@ -205,6 +222,25 @@ CASES = [
         "расскажи про Игоря",
         None,
         [expect_intent("query_person")],
+    ),
+    # --- "У ..." statement vs question about a birthday (new bug) ---
+    (
+        "birthday statement, not query (new bug)",
+        "У Валерчика др 12 июля",
+        None,
+        [expect_intent("add_person_info"), expect_birthday_mmdd("07-12"), expect_not_intent("query_person")],
+    ),
+    (
+        "birthday question about one person",
+        "Когда др у Валерчика?",
+        None,
+        [expect_intent("query_person"), expect_person_name("Валерчик")],
+    ),
+    (
+        "birthday question about a month (list)",
+        "У кого др в июле?",
+        None,
+        [expect_intent("query_person"), expect_person_name(None)],
     ),
     (
         "list_people",

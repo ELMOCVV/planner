@@ -17,3 +17,5 @@ class PersonFlow(StatesGroup):
     waiting_rename = State()
     confirm_delete_person = State()
     waiting_person_name = State()
+    candidates = State()
+    confirm_alias_on_create = State()
