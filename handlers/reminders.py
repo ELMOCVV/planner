@@ -205,6 +205,10 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
         if not selected:
             await callback.answer("Выбери хотя бы один вариант", show_alert=True)
             return
+        if "draft_text" not in data:
+            # Double-tap after the first tap already created the reminder.
+            await callback.answer("Уже обработано", show_alert=False)
+            return
         text = data["draft_text"]
         event_time = dt.datetime.fromisoformat(data["draft_time"])
         recurrence = data.get("recurrence_rule")

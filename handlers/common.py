@@ -154,9 +154,34 @@ async def dispatch_text(message: Message, state: FSMContext) -> None:
         had_state = await state.get_state() is not None
         await state.clear()
         conversation.record_user(user_id, text)
-        reply = "Отменил текущее действие." if had_state else "Нечего отменять — сейчас ничего не выполняется."
-        await _reply(message, reply)
+        if had_state:
+            await _reply(message, "Отменил текущее действие.")
+        else:
+            # Nothing in progress — treat "удали/отмени ..." as a deletion
+            # request and show the reminders list with delete buttons
+            # (still deterministic: nothing is deleted without a tap).
+            await _reply(
+                message,
+                "Сейчас ничего не выполняется. Если хочешь удалить напоминание — "
+                "выбери его ниже. Людей можно удалить из карточки (/people).",
+            )
+            await reminders.show_reminders_list(message)
         return
+
+    # Any FSM state that lets a text message fall through to this handler
+    # is by construction a button-wait state (text-wait states have their
+    # own message handlers on earlier routers). The user typed something
+    # new instead of tapping — treat that as abandoning the old menu, or
+    # its stale draft data would leak into the next flow.
+    if await state.get_state() is not None:
+        await state.clear()
+
+    # Classification takes a real API round-trip (~1-2s) — show typing so
+    # the user gets feedback immediately.
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
 
     context = conversation.get_context_text(user_id)
     conversation.record_user(user_id, text)

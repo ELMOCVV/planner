@@ -12,7 +12,7 @@ from db.repo import init_db
 from handlers import common, people, reminders, settings
 from handlers.common import AccessControlMiddleware
 from services.birthdays import sync_all_birthday_reminders
-from services.scheduler import init_scheduler
+from services.scheduler import init_scheduler, restore_missing_jobs
 
 
 def setup_logging() -> None:
@@ -58,6 +58,7 @@ async def main() -> None:
 
     init_scheduler(bot)
     await sync_all_birthday_reminders()
+    await restore_missing_jobs()
 
     logger.info("Bot started")
     try:

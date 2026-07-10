@@ -1,4 +1,3 @@
-import datetime as dt
 import logging
 
 from aiogram import F, Router
@@ -20,7 +19,7 @@ import db.repo as repo
 from handlers.states import PersonFlow
 from handlers.ui import CLOSE_BUTTON, EMPTY_KB
 from services import birthdays, conversation, note_matcher
-from services.person_matcher import CREATE_MATCH_THRESHOLD, find_matches, normalize
+from services.person_matcher import CREATE_MATCH_THRESHOLD, find_matches
 
 logger = logging.getLogger(__name__)
 router = Router(name="people")
@@ -180,6 +179,9 @@ async def handle_dup_candidate(callback: CallbackQuery, state: FSMContext) -> No
         return
 
     person_id = int(choice)
+    if not draft.get("name"):
+        await callback.answer("Уже обработано", show_alert=False)
+        return
     await state.update_data(draft=draft)
     await state.set_state(PersonFlow.confirm_alias_on_create)
     async with session_scope() as session:
@@ -204,6 +206,10 @@ async def handle_alias_yes_no(callback: CallbackQuery, state: FSMContext) -> Non
     person_id = int(person_id_s)
     data = await state.get_data()
     draft = data.get("draft", {})
+
+    if not draft.get("name"):
+        await callback.answer("Уже обработано", show_alert=False)
+        return
 
     async with session_scope() as session:
         if choice == "yes":
@@ -360,6 +366,10 @@ async def handle_create_confirm(callback: CallbackQuery, state: FSMContext) -> N
         return
 
     if action == "confirm":
+        if not draft.get("name"):
+            # Double-tap after the state was already cleared by the first tap.
+            await callback.answer("Уже обработано", show_alert=False)
+            return
         async with session_scope() as session:
             person = await _create_person_from_draft(session, callback.from_user.id, draft)
         await state.clear()
