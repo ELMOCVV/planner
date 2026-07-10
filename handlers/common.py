@@ -190,6 +190,7 @@ async def dispatch_text(message: Message, state: FSMContext) -> None:
 
     handlers_map: dict[str, Callable[[], Awaitable[Any]]] = {
         "create_reminder": lambda: reminders.start_reminder_flow(message, state, parsed),
+        "query_reminder": lambda: reminders.start_query_reminder(message, parsed),
         "list_reminders": lambda: reminders.show_reminders_list(message),
         "delete_reminder": lambda: reminders.show_reminders_list(message),
         "add_person": lambda: people.start_add_person(message, state, parsed),

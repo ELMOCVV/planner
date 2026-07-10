@@ -588,6 +588,12 @@ async def start_query_person(message: Message, parsed: dict) -> None:
         if month:
             await start_birthday_month_query(message, month)
             return
+        # Defensive: "у кого есть собака?" occasionally classifies as
+        # query_person (no name) instead of search_notes; if the model
+        # extracted a search query anyway, honour it as a note search.
+        if parsed.get("search_query"):
+            await start_search_notes(message, parsed)
+            return
         await message.answer("О ком рассказать? Уточни имя.")
         return
     async with session_scope() as session:
