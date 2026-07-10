@@ -140,6 +140,14 @@ async def _reschedule_recurrence(session, reminder) -> None:
         await session.commit()
         return
     reminder.event_time = next_time
+    if reminder.recurrence_rule == "yearly" and "Исполняется" in reminder.text:
+        # Birthday reminders with a known year embed the age in the text;
+        # bump it when rolling over to next year's occurrence.
+        import re
+
+        reminder.text = re.sub(
+            r"Исполняется (\d+)", lambda m: f"Исполняется {int(m.group(1)) + 1}", reminder.text
+        )
     await session.flush()
     alert = await repo.add_alert(session, reminder.id, next_time, label="on_time")
     job_id = schedule_alert(alert.id, next_time)

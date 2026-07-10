@@ -155,6 +155,10 @@ async def handle_time_reply(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     context = conversation.get_context_text(user_id)
     conversation.record_user(user_id, text)
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     parsed = await llm_parser.parse_message(text, context=context)
     event_time = llm_parser.parse_event_time(parsed.get("event_time"))
     if event_time is None:
@@ -257,6 +261,10 @@ async def handle_custom_offset(message: Message, state: FSMContext) -> None:
         return
 
     conversation.record_user(user_id, text)
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     minutes = await llm_parser.parse_offset_minutes(text)
     if minutes is None:
         reply = "Не понял. Попробуй, например, «за 40 минут» или «за 2 часа»."
@@ -322,7 +330,9 @@ async def show_reminders_list(message: Message) -> None:
     async with session_scope() as session:
         reminders = await list_active_reminders(session, message.from_user.id)
     if not reminders:
-        await message.answer("Активных напоминаний нет.")
+        await message.answer(
+            "Активных напоминаний нет. Напиши, например, «напомни позвонить маме завтра в 10»."
+        )
         return
     rows = []
     for r in reminders:

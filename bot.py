@@ -60,6 +60,19 @@ async def main() -> None:
     await sync_all_birthday_reminders()
     await restore_missing_jobs()
 
+    from services.backup import run_daily_backup
+    from services.scheduler import scheduler as _sched
+
+    _sched.add_job(
+        run_daily_backup,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="daily_backup",
+        replace_existing=True,
+        misfire_grace_time=86400,
+    )
+
     logger.info("Bot started")
     try:
         await dp.start_polling(bot)

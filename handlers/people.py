@@ -534,19 +534,25 @@ async def start_add_alias(message: Message, parsed: dict) -> None:
 
 
 def _person_card_text(person) -> str:
+    from handlers.ui import format_birthday_ru, format_date_ru
+
     lines = [f"👤 {person.name}"]
     if person.tag:
         lines[0] += f" ({person.tag})"
     if person.aliases:
-        lines.append("Алиасы: " + ", ".join(a.alias for a in person.aliases))
+        lines.append("Также: " + ", ".join(a.alias for a in person.aliases))
     if person.birthday_month and person.birthday_day:
-        lines.append(f"🎂 День рождения: {person.birthday_day:02d}.{person.birthday_month:02d}")
+        lines.append(
+            f"🎂 День рождения: {format_birthday_ru(person.birthday_month, person.birthday_day, person.birthday_year)}"
+        )
     if person.notes:
-        lines.append("Заметки:")
+        lines.append("")
+        lines.append("📝 Заметки:")
         for n in sorted(person.notes, key=lambda x: x.created_at):
-            lines.append(f"  • {n.text} ({n.created_at.strftime('%d.%m.%Y')})")
+            lines.append(f"  • {n.text} — {format_date_ru(n.created_at.date())}")
     else:
-        lines.append("Заметок пока нет.")
+        lines.append("")
+        lines.append("📝 Заметок пока нет — просто напиши факт, я запомню.")
     return "\n".join(lines)
 
 
@@ -564,20 +570,26 @@ def _person_card_kb(person_id: int) -> InlineKeyboardMarkup:
 
 
 async def start_birthday_month_query(message: Message, month: int) -> None:
+    from handlers.ui import format_birthday_ru
+
     async with session_scope() as session:
         people = await repo.people_with_birthday_on(session, message.from_user.id, month)
     if not people:
-        await message.answer("В этом месяце дней рождения не нашёл.")
+        await message.answer(
+            "В этом месяце дней рождения не нашёл. Если знаешь чей-то др — "
+            "напиши, например «у Валеры др 12 июля», я запомню."
+        )
         return
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{p.name} — {p.birthday_day:02d}.{p.birthday_month:02d}",
+                text=f"🎂 {p.name} — {format_birthday_ru(p.birthday_month, p.birthday_day)}",
                 callback_data=f"cardshow:{p.id}",
             )
         ]
         for p in sorted(people, key=lambda x: x.birthday_day or 0)
     ]
+    rows.append([CLOSE_BUTTON])
     await message.answer("Дни рождения в этом месяце:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -649,7 +661,9 @@ async def show_people_list(message: Message, page: int = 0) -> None:
     async with session_scope() as session:
         people = await list_people(session, message.from_user.id)
     if not people:
-        await message.answer("В базе пока никого нет.")
+        await message.answer(
+            "Пока никого нет. Напиши «новый знакомый Валера, любит рыбалку» — я запомню."
+        )
         return
     await message.answer(f"Твои люди ({len(people)}):", reply_markup=_people_list_kb(people, page))
 

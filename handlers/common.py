@@ -18,32 +18,45 @@ logger = logging.getLogger(__name__)
 router = Router(name="common")
 
 START_TEXT = (
-    "👋 Привет! Я твой личный помощник.\n\n"
-    "Примеры того, что мне можно написать:\n"
-    "⏰ «позвонить бабушке сегодня в 12»\n"
-    "👤 «новый знакомый Валера, день рождения 12 июля, любит рыбалку»\n"
+    "👋 Привет! Я Kontinental — твой личный помощник: напоминания и память о людях.\n\n"
+    "Просто пиши обычным текстом:\n"
+    "⏰ «напомни позвонить бабушке завтра в 12»\n"
+    "🔁 «каждый день в 9 пить воду»\n"
+    "👤 «новый знакомый Валера, др 12 июля, любит рыбалку»\n"
     "📝 «у Валеры есть собака Рекс»\n"
-    "🔎 «кто любит рыбалку?»\n"
-    "📋 «мои напоминания» / «мои люди»\n\n"
-    "Используй /help для подробностей."
+    "🔎 «кто любит рыбалку?» / «что я знаю про Валеру?»\n"
+    "❓ «напомнишь ли ты мне что-то 12 июля?»\n\n"
+    "📋 «мои напоминания» / «мои люди» / «настройки»\n"
+    "Подробнее — /help"
 )
 
 HELP_TEXT = (
-    "ℹ️ Что я умею:\n\n"
-    "⏰ Напоминания — просто напиши, что и когда напомнить. Могу спросить, "
-    "за сколько предупредить заранее, и умею повторяющиеся напоминания "
-    "(«каждый день в 9», «каждый понедельник»).\n"
-    "/reminders — список активных напоминаний.\n\n"
-    "👤 Люди — расскажи о новом знакомом, я сохраню карточку. Дальше просто "
-    "пиши новые факты о нём («Валера теперь работает в такси»), я сам пойму, "
-    "к кому это относится (и переспрошу, если не уверен).\n"
-    "/people — список всех людей.\n\n"
-    "🎂 Если укажешь день рождения — я сам заведу ежегодное напоминание.\n"
-    "🔎 Спроси «кто любит рыбалку?» или «что я знаю про Валеру?» — найду по заметкам.\n\n"
-    "/export — выгрузить всё в JSON-файл (бэкап).\n"
-    "/stats — сколько людей, заметок и активных напоминаний сейчас в базе.\n"
-    "/settings — во сколько напоминать о днях рождения (плюс тестовое уведомление).\n\n"
-    "Если не пойму сообщение — просто честно скажу и попрошу переформулировать."
+    "ℹ️ Что я умею\n\n"
+    "⏰ <b>Напоминания</b>\n"
+    "Напиши, что и когда напомнить — понимаю «завтра в 10», «через час», "
+    "«в 15 30», «в пол шестого». Спрошу, за сколько предупредить заранее "
+    "(можно несколько вариантов). Повторяющиеся: «каждый день в 9», «каждый понедельник». "
+    "Когда напоминание сработает — кнопки «Сделано» и «Отложить».\n"
+    "Спросить, что запланировано: «напомнишь ли мне это 12 июля?», /reminders, /today.\n"
+    "Удалить: «удали напоминание» → выберешь из списка.\n\n"
+    "👤 <b>Люди</b>\n"
+    "«Новый знакомый Валера, любит рыбалку» — заведу карточку. Дальше просто "
+    "пиши факты: «у Валеры собака Рекс» — сам пойму, к кому это (Валера, Валерчик "
+    "и Валерий для меня один человек; если не уверен — переспрошу). "
+    "«Валера это тот же Валерий» — склею имена.\n"
+    "«Что я знаю про Валеру?» — карточка. «Кто любит рыбалку?» — поиск по заметкам. "
+    "«У кого др в июле?» — дни рождения. /people — все люди.\n\n"
+    "🎂 <b>Дни рождения</b>\n"
+    "Скажи «у Валеры др 12 июля» — заведу ежегодное напоминание. "
+    "Время уведомления настраивается в /settings (там же — тестовое уведомление).\n\n"
+    "🛠 <b>Команды</b>\n"
+    "/today — что сегодня (напоминания + дни рождения)\n"
+    "/reminders — активные напоминания\n"
+    "/people — все люди\n"
+    "/settings — время др-уведомлений, тест\n"
+    "/stats — сколько всего записано\n"
+    "/export — бэкап в JSON-файл\n"
+    "/cancel — отменить текущее действие"
 )
 
 
@@ -93,6 +106,48 @@ async def handle_close(callback: CallbackQuery) -> None:
     except Exception:
         logger.warning("Failed to delete message on close", exc_info=True)
     await callback.answer()
+
+
+@router.message(Command("today"))
+@router.message(F.text.casefold() == "что сегодня")
+async def cmd_today(message: Message) -> None:
+    import datetime as _dt
+
+    from zoneinfo import ZoneInfo
+
+    from config import TIMEZONE
+    from db.repo import list_active_reminders, people_with_birthday_on
+
+    tz = ZoneInfo(TIMEZONE)
+    now = _dt.datetime.now(tz)
+    user_id = message.from_user.id
+
+    async with session_scope() as session:
+        active = await list_active_reminders(session, user_id)
+        bday_people = await people_with_birthday_on(session, user_id, now.month, now.day)
+
+    # Birthdays are listed from the people table; skip the auto-created
+    # 🎂 reminders so they don't show up twice.
+    todays = [
+        r for r in active
+        if r.event_time.date() == now.date() and not r.text.startswith("🎂")
+    ]
+    lines = [f"📅 Сегодня, {now.day} {_month_ru(now.month)}:"]
+    if bday_people:
+        for p in bday_people:
+            lines.append(f"🎂 День рождения у {p.name}!")
+    if todays:
+        for r in todays:
+            lines.append(f"⏰ {r.event_time.strftime('%H:%M')} — {r.text}")
+    if not bday_people and not todays:
+        lines.append("Ничего не запланировано — свободный день 🙌")
+    await message.answer("\n".join(lines))
+
+
+def _month_ru(month: int) -> str:
+    from handlers.ui import MONTHS_RU_GEN
+
+    return MONTHS_RU_GEN[month - 1]
 
 
 @router.message(Command("stats"))
