@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import config
 from db.repo import init_db
 from handlers import common, people, reminders, settings
-from handlers.common import AccessControlMiddleware
+from handlers.common import AccessControlMiddleware, ErrorGuardMiddleware
 from services.birthdays import sync_all_birthday_reminders
 from services.scheduler import init_scheduler, restore_missing_jobs
 
@@ -48,6 +48,10 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
+    # Order matters: the error guard wraps everything (outermost), then
+    # access control filters unauthorized users before any handler runs.
+    dp.message.middleware(ErrorGuardMiddleware())
+    dp.callback_query.middleware(ErrorGuardMiddleware())
     dp.message.middleware(AccessControlMiddleware())
     dp.callback_query.middleware(AccessControlMiddleware())
 
@@ -75,9 +79,18 @@ async def main() -> None:
 
     logger.info("Bot started")
     try:
+        # aiogram handles SIGINT/SIGTERM itself (Railway sends SIGTERM on
+        # redeploy): polling stops and in-flight handlers finish before
+        # start_polling returns, then we release everything else.
         await dp.start_polling(bot)
     finally:
+        logger.info("Shutting down: scheduler, DB engine, bot session")
+        _sched.shutdown(wait=False)
+        from db.repo import engine
+
+        await engine.dispose()
         await bot.session.close()
+        logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":

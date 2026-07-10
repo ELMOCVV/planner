@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -219,25 +220,37 @@ async def parse_message(user_text: str, context: str | None = None) -> dict:
     replies to a prior bot question — it is embedded in the system prompt,
     not as fake message turns, so the model isn't tempted to "answer" it.
 
-    On any failure (network, invalid JSON) returns a safe default with
-    intent "unknown" so the bot can ask the user to rephrase.
+    On invalid JSON returns a safe default with intent "unknown" so the
+    bot can ask the user to rephrase. On an API failure (after one retry
+    with backoff) the default additionally carries "api_error": True so
+    the dispatcher can tell "couldn't reach the model" apart from
+    "message genuinely wasn't understood".
     """
     system_prompt = _build_system_prompt()
     if context:
         system_prompt += f"\n\nИстория последних сообщений (для контекста):\n{context}\n"
 
-    try:
-        response = await _client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=1024,
-            temperature=0,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_text}],
-        )
-        raw = response.content[0].text.strip()
-    except Exception:
-        logger.exception("Anthropic API call failed for message=%r", user_text)
-        return dict(DEFAULT_RESULT)
+    raw = None
+    for attempt in (1, 2):
+        try:
+            response = await _client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=1024,
+                temperature=0,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_text}],
+            )
+            raw = response.content[0].text.strip()
+            break
+        except Exception:
+            if attempt == 1:
+                logger.warning("Anthropic API call failed (attempt 1), retrying in 1s", exc_info=True)
+                await asyncio.sleep(1)
+            else:
+                logger.exception("Anthropic API call failed after retry for message=%r", user_text)
+                result = dict(DEFAULT_RESULT)
+                result["api_error"] = True
+                return result
 
     raw = _strip_code_fences(raw)
 

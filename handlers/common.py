@@ -60,6 +60,31 @@ HELP_TEXT = (
 )
 
 
+class ErrorGuardMiddleware(BaseMiddleware):
+    """Last line of defence: any unhandled exception in a handler is
+    logged with its traceback and turned into a short apologetic message;
+    the bot keeps running and the update is considered consumed."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        try:
+            return await handler(event, data)
+        except Exception:
+            logger.exception("Unhandled exception in handler for %s", type(event).__name__)
+            try:
+                if isinstance(event, Message):
+                    await event.answer("😵 Что-то пошло не так. Попробуй ещё раз.")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("😵 Что-то пошло не так. Попробуй ещё раз.", show_alert=True)
+            except Exception:
+                logger.warning("Failed to deliver the error apology", exc_info=True)
+            return None
+
+
 class AccessControlMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -242,6 +267,14 @@ async def dispatch_text(message: Message, state: FSMContext) -> None:
     conversation.record_user(user_id, text)
     parsed = await llm_parser.parse_message(text, context=context)
     intent = parsed.get("intent")
+
+    if parsed.get("api_error"):
+        await _reply(
+            message,
+            "😵 Не получилось обработать сообщение — сервис распознавания "
+            "сейчас недоступен. Попробуй ещё раз через минуту.",
+        )
+        return
 
     handlers_map: dict[str, Callable[[], Awaitable[Any]]] = {
         "create_reminder": lambda: reminders.start_reminder_flow(message, state, parsed),
