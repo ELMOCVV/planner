@@ -120,6 +120,10 @@ async def handle_custom_time_text(message: Message, state: FSMContext) -> None:
         return
 
     conversation.record_user(user_id, text)
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     parsed_time = await llm_parser.parse_time_of_day(text)
     if parsed_time is None:
         reply = "Не понял время. Попробуй, например, «16:45» или «в 5 вечера»."

@@ -31,6 +31,18 @@ def init_scheduler(bot: Bot) -> None:
     scheduler.start()
 
 
+# A day of grace lets reminders still fire (marked as late) after the bot
+# was down overnight — with the previous 1h grace, anything that came due
+# during a longer outage was silently dropped by APScheduler.
+MISFIRE_GRACE_SECONDS = 86400
+
+# If sending a due alert to Telegram fails, retry this much later instead
+# of marking it fired (a date-trigger job never re-runs on its own).
+SEND_RETRY_MINUTES = 5
+
+LATE_THRESHOLD = dt.timedelta(minutes=10)
+
+
 def schedule_alert(alert_id: int, fire_time: dt.datetime) -> str:
     job_id = f"alert_{alert_id}"
     scheduler.add_job(
@@ -40,7 +52,7 @@ def schedule_alert(alert_id: int, fire_time: dt.datetime) -> str:
         args=[alert_id],
         id=job_id,
         replace_existing=True,
-        misfire_grace_time=3600,
+        misfire_grace_time=MISFIRE_GRACE_SECONDS,
     )
     return job_id
 
@@ -67,17 +79,18 @@ async def fire_alert(alert_id: int) -> None:
         if reminder is None or reminder.status != "active":
             return
 
-        alert.fired = True
-        await session.commit()
-
         event_local = reminder.event_time
         if event_local.tzinfo is None:
             event_local = event_local.replace(tzinfo=TZ)
         else:
             event_local = event_local.astimezone(TZ)
 
+        now = dt.datetime.now(TZ)
+        fire_local = alert.fire_time.replace(tzinfo=TZ) if alert.fire_time.tzinfo is None else alert.fire_time
+        late_note = " (с опозданием)" if now - fire_local > LATE_THRESHOLD else ""
+
         text = (
-            f"🔔 Напоминание: {reminder.text} "
+            f"🔔 Напоминание{late_note}: {reminder.text} "
             f"(событие в {event_local.strftime('%H:%M')})"
         )
         kb = InlineKeyboardMarkup(
@@ -98,7 +111,18 @@ async def fire_alert(alert_id: int) -> None:
         try:
             await _bot.send_message(reminder.user_id, text, reply_markup=kb)
         except Exception:
-            logger.exception("Failed to send reminder alert %s", alert_id)
+            # Do NOT mark the alert fired: a date-trigger job never re-runs
+            # by itself, so a failed send would silently swallow the
+            # reminder. Retry in a few minutes instead.
+            logger.exception(
+                "Failed to send reminder alert %s — retrying in %d min", alert_id, SEND_RETRY_MINUTES
+            )
+            retry_time = now + dt.timedelta(minutes=SEND_RETRY_MINUTES)
+            schedule_alert(alert_id, retry_time)
+            return
+
+        alert.fired = True
+        await session.commit()
 
         all_alerts = await repo.list_alerts(session, reminder.id)
         remaining = [a for a in all_alerts if not a.fired]
@@ -116,6 +140,14 @@ async def _reschedule_recurrence(session, reminder) -> None:
         await session.commit()
         return
     reminder.event_time = next_time
+    if reminder.recurrence_rule == "yearly" and "Исполняется" in reminder.text:
+        # Birthday reminders with a known year embed the age in the text;
+        # bump it when rolling over to next year's occurrence.
+        import re
+
+        reminder.text = re.sub(
+            r"Исполняется (\d+)", lambda m: f"Исполняется {int(m.group(1)) + 1}", reminder.text
+        )
     await session.flush()
     alert = await repo.add_alert(session, reminder.id, next_time, label="on_time")
     job_id = schedule_alert(alert.id, next_time)
@@ -143,6 +175,39 @@ def compute_next_occurrence(current: dt.datetime, rule: str) -> dt.datetime | No
         days_ahead = days_ahead or 7
         return current + dt.timedelta(days=days_ahead)
     return None
+
+
+async def restore_missing_jobs() -> int:
+    """Startup consistency check between the DB and the APScheduler
+    jobstore: any unfired alert of an active reminder that has no live
+    job (jobstore file lost, job dropped past its grace window, etc.)
+    gets rescheduled. Past-due fire times are pushed a few seconds out so
+    they deliver promptly rather than being re-dropped as misfires."""
+    restored = 0
+    now = dt.datetime.now(TZ)
+    async with session_scope() as session:
+        from sqlalchemy import select
+
+        from db.models import Reminder, ReminderAlert
+
+        res = await session.execute(
+            select(ReminderAlert)
+            .join(Reminder, Reminder.id == ReminderAlert.reminder_id)
+            .where(ReminderAlert.fired.is_(False), Reminder.status == "active")
+        )
+        for alert in res.scalars().all():
+            if alert.job_id and scheduler.get_job(alert.job_id):
+                continue
+            fire_time = alert.fire_time.replace(tzinfo=TZ) if alert.fire_time.tzinfo is None else alert.fire_time
+            run_at = max(fire_time, now + dt.timedelta(seconds=10))
+            alert.job_id = schedule_alert(alert.id, run_at)
+            restored += 1
+        await session.commit()
+    if restored:
+        logger.warning("Jobstore consistency check: restored %d missing job(s)", restored)
+    else:
+        logger.info("Jobstore consistency check: all alert jobs present")
+    return restored
 
 
 async def snooze_reminder(reminder_id: int, minutes: int) -> dt.datetime:

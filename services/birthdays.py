@@ -92,10 +92,15 @@ async def sync_birthday_reminders(session: AsyncSession, person: Person) -> None
 
     hour, minute = await get_effective_alert_time(session, person.user_id)
     event_time = _next_birthday_dt(person.birthday_month, person.birthday_day, hour, minute)
+    text = f"🎂 Сегодня день рождения у {person.name}!"
+    if person.birthday_year:
+        # Age as of the scheduled occurrence. The yearly rollover in
+        # services/scheduler.py increments it when re-arming for next year.
+        text += f" Исполняется {event_time.year - person.birthday_year}."
     reminder = await create_reminder(
         session,
         person.user_id,
-        f"🎂 Сегодня день рождения у {person.name}!",
+        text,
         event_time,
         recurrence_rule="yearly",
     )

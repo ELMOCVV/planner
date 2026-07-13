@@ -62,18 +62,32 @@ def _offsets_keyboard(selected: list[int]) -> InlineKeyboardMarkup:
 
 
 def _fmt_time(event_time: dt.datetime) -> str:
+    from handlers.ui import format_date_ru
+
     now = dt.datetime.now(TZ)
     if event_time.date() == now.date():
         return f"сегодня в {event_time.strftime('%H:%M')}"
     if event_time.date() == (now + dt.timedelta(days=1)).date():
         return f"завтра в {event_time.strftime('%H:%M')}"
-    return event_time.strftime("%d.%m в %H:%M")
+    return f"{format_date_ru(event_time.date())} в {event_time.strftime('%H:%M')}"
 
 
 async def start_reminder_flow(message: Message, state: FSMContext, parsed: dict) -> None:
     text = parsed.get("reminder_text") or message.text
     event_time = llm_parser.parse_event_time(parsed.get("event_time"))
     recurrence = parsed.get("recurrence_rule")
+
+    # Mixed intent ("напомни позвонить Валере завтра, кстати у него собака
+    # Рекс"): the reminder is the primary action; acknowledge the person
+    # fact so it isn't silently dropped, without derailing this flow into
+    # the person-matching FSM mid-reminder.
+    facts = parsed.get("person_facts") or []
+    if facts and parsed.get("person_name"):
+        facts_str = ", ".join(facts)
+        await message.answer(
+            f"📝 Кстати, про {parsed['person_name']} ({facts_str}) — напиши это "
+            "отдельным сообщением после напоминания, и я сохраню в заметки."
+        )
 
     if event_time is None or parsed.get("time_ambiguous"):
         await state.update_data(draft_text=text, recurrence_rule=recurrence)
@@ -141,6 +155,10 @@ async def handle_time_reply(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     context = conversation.get_context_text(user_id)
     conversation.record_user(user_id, text)
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     parsed = await llm_parser.parse_message(text, context=context)
     event_time = llm_parser.parse_event_time(parsed.get("event_time"))
     if event_time is None:
@@ -205,6 +223,10 @@ async def handle_offset_toggle(callback: CallbackQuery, state: FSMContext) -> No
         if not selected:
             await callback.answer("Выбери хотя бы один вариант", show_alert=True)
             return
+        if "draft_text" not in data:
+            # Double-tap after the first tap already created the reminder.
+            await callback.answer("Уже обработано", show_alert=False)
+            return
         text = data["draft_text"]
         event_time = dt.datetime.fromisoformat(data["draft_time"])
         recurrence = data.get("recurrence_rule")
@@ -239,6 +261,10 @@ async def handle_custom_offset(message: Message, state: FSMContext) -> None:
         return
 
     conversation.record_user(user_id, text)
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     minutes = await llm_parser.parse_offset_minutes(text)
     if minutes is None:
         reply = "Не понял. Попробуй, например, «за 40 минут» или «за 2 часа»."
@@ -260,11 +286,53 @@ async def list_reminders_cmd(message: Message) -> None:
     await show_reminders_list(message)
 
 
+async def start_query_reminder(message: Message, parsed: dict) -> None:
+    """Answer a question about EXISTING reminders ("Напомнишь ли ты мне
+    это 12 июля?") instead of starting a new-reminder flow."""
+    asked_dt = llm_parser.parse_event_time(parsed.get("event_time"))
+    asked_text = (parsed.get("reminder_text") or "").lower()
+
+    async with session_scope() as session:
+        active = await list_active_reminders(session, message.from_user.id)
+
+    matches = active
+    if asked_dt is not None:
+        matches = [r for r in matches if r.event_time.date() == asked_dt.date()]
+    elif asked_text:
+        words = [w for w in asked_text.split() if len(w) > 3]
+        matches = [r for r in matches if any(w in r.text.lower() for w in words)] or matches
+
+    if asked_dt is not None and not matches:
+        await message.answer(
+            f"На {_fmt_date(asked_dt)} пока нет напоминаний. Хочешь создать? "
+            "Просто напиши, о чём напомнить."
+        )
+        return
+    if not matches:
+        await message.answer("Пока нет активных напоминаний. Напиши, о чём напомнить — я запомню.")
+        return
+
+    lines = ["Да, напомню:"]
+    for r in matches[:5]:
+        event_local = r.event_time if r.event_time.tzinfo else r.event_time.replace(tzinfo=TZ)
+        emoji = "🎂" if r.text.startswith("🎂") else "⏰"
+        lines.append(f"{emoji} {_fmt_time(event_local)} — {r.text.lstrip('🎂 ')}")
+    await message.answer("\n".join(lines))
+
+
+def _fmt_date(when: dt.datetime) -> str:
+    from handlers.ui import format_date_ru
+
+    return format_date_ru(when.date())
+
+
 async def show_reminders_list(message: Message) -> None:
     async with session_scope() as session:
         reminders = await list_active_reminders(session, message.from_user.id)
     if not reminders:
-        await message.answer("Активных напоминаний нет.")
+        await message.answer(
+            "Активных напоминаний нет. Напиши, например, «напомни позвонить маме завтра в 10»."
+        )
         return
     rows = []
     for r in reminders:

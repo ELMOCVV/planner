@@ -1,4 +1,3 @@
-import datetime as dt
 import logging
 
 from aiogram import F, Router
@@ -20,7 +19,7 @@ import db.repo as repo
 from handlers.states import PersonFlow
 from handlers.ui import CLOSE_BUTTON, EMPTY_KB
 from services import birthdays, conversation, note_matcher
-from services.person_matcher import CREATE_MATCH_THRESHOLD, find_matches, normalize
+from services.person_matcher import CREATE_MATCH_THRESHOLD, find_matches
 
 logger = logging.getLogger(__name__)
 router = Router(name="people")
@@ -180,6 +179,9 @@ async def handle_dup_candidate(callback: CallbackQuery, state: FSMContext) -> No
         return
 
     person_id = int(choice)
+    if not draft.get("name"):
+        await callback.answer("Уже обработано", show_alert=False)
+        return
     await state.update_data(draft=draft)
     await state.set_state(PersonFlow.confirm_alias_on_create)
     async with session_scope() as session:
@@ -204,6 +206,10 @@ async def handle_alias_yes_no(callback: CallbackQuery, state: FSMContext) -> Non
     person_id = int(person_id_s)
     data = await state.get_data()
     draft = data.get("draft", {})
+
+    if not draft.get("name"):
+        await callback.answer("Уже обработано", show_alert=False)
+        return
 
     async with session_scope() as session:
         if choice == "yes":
@@ -360,6 +366,10 @@ async def handle_create_confirm(callback: CallbackQuery, state: FSMContext) -> N
         return
 
     if action == "confirm":
+        if not draft.get("name"):
+            # Double-tap after the state was already cleared by the first tap.
+            await callback.answer("Уже обработано", show_alert=False)
+            return
         async with session_scope() as session:
             person = await _create_person_from_draft(session, callback.from_user.id, draft)
         await state.clear()
@@ -524,19 +534,25 @@ async def start_add_alias(message: Message, parsed: dict) -> None:
 
 
 def _person_card_text(person) -> str:
+    from handlers.ui import format_birthday_ru, format_date_ru
+
     lines = [f"👤 {person.name}"]
     if person.tag:
         lines[0] += f" ({person.tag})"
     if person.aliases:
-        lines.append("Алиасы: " + ", ".join(a.alias for a in person.aliases))
+        lines.append("Также: " + ", ".join(a.alias for a in person.aliases))
     if person.birthday_month and person.birthday_day:
-        lines.append(f"🎂 День рождения: {person.birthday_day:02d}.{person.birthday_month:02d}")
+        lines.append(
+            f"🎂 День рождения: {format_birthday_ru(person.birthday_month, person.birthday_day, person.birthday_year)}"
+        )
     if person.notes:
-        lines.append("Заметки:")
+        lines.append("")
+        lines.append("📝 Заметки:")
         for n in sorted(person.notes, key=lambda x: x.created_at):
-            lines.append(f"  • {n.text} ({n.created_at.strftime('%d.%m.%Y')})")
+            lines.append(f"  • {n.text} — {format_date_ru(n.created_at.date())}")
     else:
-        lines.append("Заметок пока нет.")
+        lines.append("")
+        lines.append("📝 Заметок пока нет — просто напиши факт, я запомню.")
     return "\n".join(lines)
 
 
@@ -554,20 +570,26 @@ def _person_card_kb(person_id: int) -> InlineKeyboardMarkup:
 
 
 async def start_birthday_month_query(message: Message, month: int) -> None:
+    from handlers.ui import format_birthday_ru
+
     async with session_scope() as session:
         people = await repo.people_with_birthday_on(session, message.from_user.id, month)
     if not people:
-        await message.answer("В этом месяце дней рождения не нашёл.")
+        await message.answer(
+            "В этом месяце дней рождения не нашёл. Если знаешь чей-то др — "
+            "напиши, например «у Валеры др 12 июля», я запомню."
+        )
         return
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{p.name} — {p.birthday_day:02d}.{p.birthday_month:02d}",
+                text=f"🎂 {p.name} — {format_birthday_ru(p.birthday_month, p.birthday_day)}",
                 callback_data=f"cardshow:{p.id}",
             )
         ]
         for p in sorted(people, key=lambda x: x.birthday_day or 0)
     ]
+    rows.append([CLOSE_BUTTON])
     await message.answer("Дни рождения в этом месяце:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -577,6 +599,12 @@ async def start_query_person(message: Message, parsed: dict) -> None:
         month = parsed.get("birthday_query_month")
         if month:
             await start_birthday_month_query(message, month)
+            return
+        # Defensive: "у кого есть собака?" occasionally classifies as
+        # query_person (no name) instead of search_notes; if the model
+        # extracted a search query anyway, honour it as a note search.
+        if parsed.get("search_query"):
+            await start_search_notes(message, parsed)
             return
         await message.answer("О ком рассказать? Уточни имя.")
         return
@@ -633,7 +661,9 @@ async def show_people_list(message: Message, page: int = 0) -> None:
     async with session_scope() as session:
         people = await list_people(session, message.from_user.id)
     if not people:
-        await message.answer("В базе пока никого нет.")
+        await message.answer(
+            "Пока никого нет. Напиши «новый знакомый Валера, любит рыбалку» — я запомню."
+        )
         return
     await message.answer(f"Твои люди ({len(people)}):", reply_markup=_people_list_kb(people, page))
 

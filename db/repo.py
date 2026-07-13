@@ -286,12 +286,6 @@ async def get_alert(session: AsyncSession, alert_id: int) -> ReminderAlert | Non
     return res.scalar_one_or_none()
 
 
-async def mark_alert_fired(session: AsyncSession, alert_id: int) -> None:
-    alert = await get_alert(session, alert_id)
-    if alert:
-        alert.fired = True
-
-
 # ---------- Export ----------
 
 

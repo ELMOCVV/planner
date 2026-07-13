@@ -42,5 +42,13 @@ def is_explicit_cancel(text: str) -> bool:
     """True only for explicit cancel/delete wording, per the fix for the
     classifier treating unrelated phrases (e.g. birthday congratulations)
     as a cancellation. Checked in code, deterministically, before any LLM
-    call — so this never depends on model judgement."""
-    return bool(CANCEL_WORDS.search(text))
+    call — so this never depends on model judgement.
+
+    A cancel word must either open the message or appear in a short
+    message (≤4 words): a longer sentence merely *containing* one — e.g.
+    "напомни, что не надо покупать хлеб" — is a normal request, not a
+    cancellation."""
+    match = CANCEL_WORDS.search(text)
+    if not match:
+        return False
+    return match.start() == 0 or len(text.split()) <= 4
